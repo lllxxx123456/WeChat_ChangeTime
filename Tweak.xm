@@ -2,10 +2,9 @@
 // WeChatChangeTime - 长按聊天时间行修改显示时间
 //
 // 功能：
-//   1) 在 ChatTimeCellView 上添加长按手势，弹出时间编辑弹窗
-//   2) 修改后的时间适配微信原有格式（短格式/展开格式）
-//   3) 适配微信自带的单击展开时间功能
-//   4) 通过 WCPluginsMgr 注册插件开关
+//   1) 长按 ChatTimeCellView 弹出时间编辑弹窗
+//   2) 支持折叠/展开两种格式，自动跟随微信单击切换
+//   3) 通过 WCPluginsMgr 注册开关（默认关闭）
 
 #import "WeChatHeaders.h"
 #import <objc/runtime.h>
@@ -20,15 +19,25 @@ static BOOL WCChangeTime_enabled(void) {
 
 #pragma mark - 关联对象 Key
 
-static char kWCCT_OriginalDateKey;       // 存储修改后对应的 NSDate
-static char kWCCT_ShortFormatKey;        // 存储短格式文本
-static char kWCCT_ExpandedFormatKey;     // 存储展开格式文本
-static char kWCCT_IsExpandedKey;         // 当前是否展开状态
-static char kWCCT_LongPressGestureKey;   // 长按手势
+static char kWCCT_CustomDateKey;         // 用户修改后的 NSDate
+static char kWCCT_ShortFormatKey;        // 折叠格式文本
+static char kWCCT_ExpandedFormatKey;     // 展开格式文本
+static char kWCCT_LongPressGestureKey;   // 长按手势引用
 
-static BOOL kWCCT_IsSettingText = NO;    // 重入保护标志
+static BOOL kWCCT_IsSettingText = NO;    // 重入保护
 
-#pragma mark - 时间格式化工具
+#pragma mark - 星期数组
+
+static NSArray<NSString *> *WCChangeTime_weekdayNames(void) {
+    static NSArray *names;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        names = @[@"", @"星期日", @"星期一", @"星期二", @"星期三", @"星期四", @"星期五", @"星期六"];
+    });
+    return names;
+}
+
+#pragma mark - 时间格式化：折叠
 
 static NSString *WCChangeTime_shortFormat(NSDate *date) {
     if (!date) return nil;
@@ -36,45 +45,34 @@ static NSString *WCChangeTime_shortFormat(NSDate *date) {
     NSCalendar *calendar = [NSCalendar currentCalendar];
     NSDate *now = [NSDate date];
 
-    NSDateComponents *todayComponents = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:now];
-    NSDate *todayStart = [calendar dateFromComponents:todayComponents];
-
-    NSDateComponents *targetComponents = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitHour | NSCalendarUnitMinute | NSCalendarUnitWeekday) fromDate:date];
+    NSDateComponents *target = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitWeekday) fromDate:date];
 
     NSDateFormatter *timeFmt = [[NSDateFormatter alloc] init];
     timeFmt.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
     timeFmt.dateFormat = @"HH:mm";
     NSString *timeStr = [timeFmt stringFromDate:date];
 
-    NSTimeInterval diff = [todayStart timeIntervalSinceDate:date];
-
-    // 今天
-    if (diff <= 0 && [calendar isDateInToday:date]) {
+    if ([calendar isDateInToday:date]) {
         return timeStr;
     }
-
-    // 昨天
     if ([calendar isDateInYesterday:date]) {
         return [NSString stringWithFormat:@"昨天 %@", timeStr];
     }
 
-    // 本周内（7天内）显示星期几
-    NSDate *weekAgo = [now dateByAddingTimeInterval:-6 * 24 * 3600];
-    if ([date compare:weekAgo] != NSOrderedAscending) {
-        NSArray *weekdays = @[@"", @"星期日", @"星期一", @"星期二", @"星期三", @"星期四", @"星期五", @"星期六"];
-        NSString *weekday = weekdays[targetComponents.weekday];
+    NSDateComponents *diffComp = [calendar components:NSCalendarUnitDay fromDate:[calendar startOfDayForDate:date] toDate:[calendar startOfDayForDate:now] options:0];
+    if (diffComp.day >= 2 && diffComp.day <= 6) {
+        NSString *weekday = WCChangeTime_weekdayNames()[target.weekday];
         return [NSString stringWithFormat:@"%@ %@", weekday, timeStr];
     }
 
-    // 今年内
     NSInteger currentYear = [calendar component:NSCalendarUnitYear fromDate:now];
-    if (targetComponents.year == currentYear) {
-        return [NSString stringWithFormat:@"%ld月%ld日 %@", (long)targetComponents.month, (long)targetComponents.day, timeStr];
+    if (target.year == currentYear) {
+        return [NSString stringWithFormat:@"%ld月%ld日 %@", (long)target.month, (long)target.day, timeStr];
     }
-
-    // 跨年
-    return [NSString stringWithFormat:@"%ld年%ld月%ld日 %@", (long)targetComponents.year, (long)targetComponents.month, (long)targetComponents.day, timeStr];
+    return [NSString stringWithFormat:@"%ld年%ld月%ld日 %@", (long)target.year, (long)target.month, (long)target.day, timeStr];
 }
+
+#pragma mark - 时间格式化：展开
 
 static NSString *WCChangeTime_expandedFormat(NSDate *date) {
     if (!date) return nil;
@@ -82,23 +80,33 @@ static NSString *WCChangeTime_expandedFormat(NSDate *date) {
     NSCalendar *calendar = [NSCalendar currentCalendar];
     NSDate *now = [NSDate date];
 
-    NSDateComponents *targetComponents = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitHour | NSCalendarUnitMinute | NSCalendarUnitWeekday) fromDate:date];
+    NSDateComponents *target = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitWeekday) fromDate:date];
 
     NSDateFormatter *timeFmt = [[NSDateFormatter alloc] init];
     timeFmt.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
     timeFmt.dateFormat = @"HH:mm";
     NSString *timeStr = [timeFmt stringFromDate:date];
 
-    NSArray *weekdays = @[@"", @"星期日", @"星期一", @"星期二", @"星期三", @"星期四", @"星期五", @"星期六"];
-    NSString *weekday = weekdays[targetComponents.weekday];
-
+    NSString *weekday = WCChangeTime_weekdayNames()[target.weekday];
     NSInteger currentYear = [calendar component:NSCalendarUnitYear fromDate:now];
 
-    if (targetComponents.year == currentYear) {
-        return [NSString stringWithFormat:@"%ld月%ld日 %@ %@", (long)targetComponents.month, (long)targetComponents.day, weekday, timeStr];
+    if (target.year == currentYear) {
+        return [NSString stringWithFormat:@"%ld月%ld日 %@ %@", (long)target.month, (long)target.day, weekday, timeStr];
     }
+    return [NSString stringWithFormat:@"%ld年%ld月%ld日 %@ %@", (long)target.year, (long)target.month, (long)target.day, weekday, timeStr];
+}
 
-    return [NSString stringWithFormat:@"%ld年%ld月%ld日 %@ %@", (long)targetComponents.year, (long)targetComponents.month, (long)targetComponents.day, weekday, timeStr];
+#pragma mark - 判断文本是展开格式还是折叠格式
+
+static BOOL WCChangeTime_textLooksExpanded(NSString *text) {
+    if (!text) return NO;
+    // 展开格式特征：
+    //   "M月d日 星期X HH:mm"（含"月""日""星期"）
+    //   "yyyy年M月d日 星期X HH:mm"（含"年"）
+    BOOL hasYear = [text containsString:@"年"];
+    BOOL hasMonthDay = [text containsString:@"月"] && [text containsString:@"日"];
+    BOOL hasWeekday = [text containsString:@"星期"];
+    return hasYear || (hasMonthDay && hasWeekday);
 }
 
 #pragma mark - 查找 MMUILabel
@@ -130,44 +138,129 @@ static UIViewController *WCChangeTime_findViewController(UIView *view) {
     return nil;
 }
 
-#pragma mark - 尝试解析用户输入的时间字符串
+#pragma mark - 输入时间解析
 
-static NSDate *WCChangeTime_parseInputTime(NSString *input) {
+static NSString *WCChangeTime_normalizeInput(NSString *input) {
+    if (!input) return nil;
+    // 全角空格 → 半角
+    NSString *s = [input stringByReplacingOccurrencesOfString:@"\u3000" withString:@" "];
+    s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // 多个空格合一
+    while ([s containsString:@"  "]) {
+        s = [s stringByReplacingOccurrencesOfString:@"  " withString:@" "];
+    }
+    return s;
+}
+
+// 从文本中剥离 "星期X" 子串（X ∈ 日/一/二/三/四/五/六/天）
+static NSString *WCChangeTime_stripWeekday(NSString *s) {
+    if (!s) return s;
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"星期[日一二三四五六天]"
+                                                                        options:0
+                                                                          error:nil];
+    NSString *out = [re stringByReplacingMatchesInString:s
+                                                 options:0
+                                                   range:NSMakeRange(0, s.length)
+                                            withTemplate:@""];
+    return WCChangeTime_normalizeInput(out);
+}
+
+static NSDate *WCChangeTime_parseInputTime(NSString *rawInput) {
+    NSString *input = WCChangeTime_normalizeInput(rawInput);
     if (!input || input.length == 0) return nil;
 
-    input = [input stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *now = [NSDate date];
 
-    NSArray *formats = @[
+    // 1) 处理 "昨天/今天/明天 HH:mm"
+    NSArray<NSString *> *relativeDays = @[@"昨天", @"今天", @"明天"];
+    for (NSString *rel in relativeDays) {
+        if ([input hasPrefix:rel]) {
+            NSString *timePart = [[input substringFromIndex:rel.length] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            NSDateFormatter *tf = [[NSDateFormatter alloc] init];
+            tf.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+            tf.dateFormat = @"HH:mm";
+            NSDate *t = [tf dateFromString:timePart];
+            if (!t) return nil;
+            NSInteger offset = 0;
+            if ([rel isEqualToString:@"昨天"]) offset = -1;
+            else if ([rel isEqualToString:@"明天"]) offset = 1;
+            NSDate *targetDay = [cal dateByAddingUnit:NSCalendarUnitDay value:offset toDate:now options:0];
+            NSDateComponents *dayComp = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:targetDay];
+            NSDateComponents *timeComp = [cal components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:t];
+            dayComp.hour = timeComp.hour;
+            dayComp.minute = timeComp.minute;
+            return [cal dateFromComponents:dayComp];
+        }
+    }
+
+    // 2) 剥离"星期X"后再尝试解析（兼容展开格式）
+    NSString *stripped = WCChangeTime_stripWeekday(input);
+
+    // 3) 如果剥离后是纯 "星期X HH:mm"，stripped 就只剩时间
+    //    需单独识别输入原本以"星期"开头的折叠格式 → 找本周对应日期
+    if ([input hasPrefix:@"星期"]) {
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"星期([日一二三四五六天])\\s*(\\d{1,2}):(\\d{2})"
+                                                                            options:0
+                                                                              error:nil];
+        NSTextCheckingResult *m = [re firstMatchInString:input options:0 range:NSMakeRange(0, input.length)];
+        if (m && m.numberOfRanges == 4) {
+            NSString *wk = [input substringWithRange:[m rangeAtIndex:1]];
+            NSString *hh = [input substringWithRange:[m rangeAtIndex:2]];
+            NSString *mm = [input substringWithRange:[m rangeAtIndex:3]];
+            NSDictionary<NSString *, NSNumber *> *wkMap = @{@"日": @1, @"一": @2, @"二": @3, @"三": @4, @"四": @5, @"五": @6, @"六": @7, @"天": @1};
+            NSInteger targetWeekday = wkMap[wk].integerValue;
+            NSInteger todayWeekday = [cal component:NSCalendarUnitWeekday fromDate:now];
+            NSInteger offset = targetWeekday - todayWeekday;
+            if (offset > 0) offset -= 7; // 往过去回退
+            NSDate *target = [cal dateByAddingUnit:NSCalendarUnitDay value:offset toDate:now options:0];
+            NSDateComponents *dayComp = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:target];
+            dayComp.hour = hh.integerValue;
+            dayComp.minute = mm.integerValue;
+            return [cal dateFromComponents:dayComp];
+        }
+    }
+
+    // 4) 常规格式尝试
+    NSArray<NSString *> *formats = @[
         @"yyyy-MM-dd HH:mm",
         @"yyyy/MM/dd HH:mm",
+        @"yyyy.MM.dd HH:mm",
+        @"yyyy年M月d日 HH:mm",
         @"yyyy年MM月dd日 HH:mm",
         @"MM-dd HH:mm",
+        @"M-d HH:mm",
         @"MM/dd HH:mm",
+        @"M/d HH:mm",
+        @"M月d日 HH:mm",
         @"MM月dd日 HH:mm",
         @"HH:mm",
+        @"H:mm",
     ];
 
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
     fmt.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
     fmt.timeZone = [NSTimeZone localTimeZone];
 
-    for (NSString *format in formats) {
-        fmt.dateFormat = format;
-        NSDate *date = [fmt dateFromString:input];
-        if (date) {
-            // 如果只输入了时间（HH:mm），用今天的日期
-            if ([format isEqualToString:@"HH:mm"]) {
-                NSCalendar *cal = [NSCalendar currentCalendar];
-                NSDateComponents *todayComp = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:[NSDate date]];
+    NSArray<NSString *> *candidates = @[stripped, input];
+    for (NSString *cand in candidates) {
+        if (!cand || cand.length == 0) continue;
+        for (NSString *format in formats) {
+            fmt.dateFormat = format;
+            NSDate *date = [fmt dateFromString:cand];
+            if (!date) continue;
+
+            // 只输入时间：使用今天日期
+            if ([format hasPrefix:@"H"]) {
+                NSDateComponents *todayComp = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:now];
                 NSDateComponents *timeComp = [cal components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:date];
                 todayComp.hour = timeComp.hour;
                 todayComp.minute = timeComp.minute;
                 return [cal dateFromComponents:todayComp];
             }
-            // 如果没有年份（MM-dd / MM/dd / MM月dd日），用当前年
-            if ([format hasPrefix:@"MM"]) {
-                NSCalendar *cal = [NSCalendar currentCalendar];
-                NSInteger currentYear = [cal component:NSCalendarUnitYear fromDate:[NSDate date]];
+            // 无年份：使用今年
+            if ([format hasPrefix:@"M"]) {
+                NSInteger currentYear = [cal component:NSCalendarUnitYear fromDate:now];
                 NSDateComponents *comp = [cal components:(NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:date];
                 comp.year = currentYear;
                 return [cal dateFromComponents:comp];
@@ -176,6 +269,21 @@ static NSDate *WCChangeTime_parseInputTime(NSString *input) {
         }
     }
     return nil;
+}
+
+#pragma mark - 应用自定义时间到 Label
+
+static void WCChangeTime_applyToLabel(UILabel *label, UIView *timeCellView, NSString *displayText) {
+    if (!label || !displayText) return;
+    kWCCT_IsSettingText = YES;
+    label.text = displayText;
+    if ([label respondsToSelector:@selector(setTextToCopy:)]) {
+        ((MMUILabel *)label).textToCopy = displayText;
+    }
+    kWCCT_IsSettingText = NO;
+    // 让父视图重新 layout（不要手动改 frame，避免位置偏移）
+    [label invalidateIntrinsicContentSize];
+    [timeCellView setNeedsLayout];
 }
 
 #pragma mark - 弹出编辑弹窗
@@ -190,7 +298,7 @@ static void WCChangeTime_showEditor(UIView *timeCellView) {
     NSString *currentText = label.text ?: @"";
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"WC-TIME"
-                                                                  message:@"修改聊天时间显示\n支持格式: HH:mm / MM-dd HH:mm / yyyy-MM-dd HH:mm\n例: 14:30 / 03-29 22:50 / 2025-03-29 22:50"
+                                                                  message:@"修改聊天时间显示\n\n支持格式：\nHH:mm / 昨天 HH:mm / 星期X HH:mm\nM月d日 HH:mm / M月d日 星期X HH:mm\nyyyy-MM-dd HH:mm / yyyy年M月d日 HH:mm"
                                                            preferredStyle:UIAlertControllerStyleAlert];
 
     [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
@@ -206,7 +314,7 @@ static void WCChangeTime_showEditor(UIView *timeCellView) {
 
         if (!newDate) {
             UIAlertController *errAlert = [UIAlertController alertControllerWithTitle:@"格式错误"
-                                                                             message:@"无法解析输入的时间，请使用以下格式:\nHH:mm (如 14:30)\nMM-dd HH:mm (如 03-29 22:50)\nyyyy-MM-dd HH:mm (如 2025-03-29 22:50)"
+                                                                             message:[NSString stringWithFormat:@"无法解析：%@\n\n请使用支持的格式重试", inputText ?: @""]
                                                                       preferredStyle:UIAlertControllerStyleAlert];
             [errAlert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
             [vc presentViewController:errAlert animated:YES completion:nil];
@@ -216,34 +324,22 @@ static void WCChangeTime_showEditor(UIView *timeCellView) {
         NSString *shortText = WCChangeTime_shortFormat(newDate);
         NSString *expandedText = WCChangeTime_expandedFormat(newDate);
 
-        objc_setAssociatedObject(timeCellView, &kWCCT_OriginalDateKey, newDate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(timeCellView, &kWCCT_CustomDateKey, newDate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(timeCellView, &kWCCT_ShortFormatKey, shortText, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(timeCellView, &kWCCT_ExpandedFormatKey, expandedText, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
-        // 判断当前是否为展开状态
-        BOOL isExpanded = [objc_getAssociatedObject(timeCellView, &kWCCT_IsExpandedKey) boolValue];
-        NSString *displayText = isExpanded ? expandedText : shortText;
-
-        kWCCT_IsSettingText = YES;
-        label.text = displayText;
-        kWCCT_IsSettingText = NO;
-        if ([label respondsToSelector:@selector(setTextToCopy:)]) {
-            [(id)label setTextToCopy:displayText];
-        }
-
-        [label sizeToFit];
-        // 居中标签
-        CGRect labelFrame = label.frame;
-        labelFrame.origin.x = (timeCellView.bounds.size.width - labelFrame.size.width) / 2.0;
-        label.frame = labelFrame;
+        // 根据当前显示的文本决定用哪个
+        BOOL expandedNow = WCChangeTime_textLooksExpanded(currentText);
+        NSString *displayText = expandedNow ? expandedText : shortText;
+        WCChangeTime_applyToLabel(label, timeCellView, displayText);
     }];
 
     UIAlertAction *restoreAction = [UIAlertAction actionWithTitle:@"还原" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        // 清除关联对象，让微信自己的逻辑重新生效
-        objc_setAssociatedObject(timeCellView, &kWCCT_OriginalDateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(timeCellView, &kWCCT_CustomDateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(timeCellView, &kWCCT_ShortFormatKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(timeCellView, &kWCCT_ExpandedFormatKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(timeCellView, &kWCCT_IsExpandedKey, @(NO), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // 触发父视图重新布局，恢复原始显示
+        [timeCellView setNeedsLayout];
     }];
 
     UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil];
@@ -264,7 +360,6 @@ static void WCChangeTime_longPressHandler(UILongPressGestureRecognizer *gesture)
     UIView *timeCellView = gesture.view;
     if (!timeCellView) return;
 
-    // 触觉反馈
     UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [feedback impactOccurred];
 
@@ -280,7 +375,6 @@ static void WCChangeTime_longPressHandler(UILongPressGestureRecognizer *gesture)
 
     if (!self.superview) return;
 
-    // 避免重复添加手势
     UILongPressGestureRecognizer *existingGesture = objc_getAssociatedObject(self, &kWCCT_LongPressGestureKey);
     if (existingGesture) return;
 
@@ -288,14 +382,12 @@ static void WCChangeTime_longPressHandler(UILongPressGestureRecognizer *gesture)
     longPress.minimumPressDuration = 0.8;
     self.userInteractionEnabled = YES;
 
-    // 避免和微信自带的 tap 手势冲突：tap 需等 longPress 失败后才触发
+    // tap 等 longPress 失败后才触发
     for (UIGestureRecognizer *gr in self.gestureRecognizers) {
         if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
             [gr requireGestureRecognizerToFail:longPress];
         }
     }
-
-    // 同时处理子视图 MMUILabel 上的手势
     UILabel *timeLabel = WCChangeTime_findTimeLabel(self);
     if (timeLabel) {
         for (UIGestureRecognizer *gr in timeLabel.gestureRecognizers) {
@@ -316,7 +408,16 @@ static void WCChangeTime_longPressHandler(UILongPressGestureRecognizer *gesture)
 
 %end
 
-#pragma mark - Hook MMUILabel (拦截微信单击展开/折叠时间)
+#pragma mark - Hook MMUILabel (拦截展开/折叠切换)
+
+static NSString *WCChangeTime_resolveDisplayText(UIView *superView, NSString *incomingText) {
+    NSString *customShort = objc_getAssociatedObject(superView, &kWCCT_ShortFormatKey);
+    NSString *customExpanded = objc_getAssociatedObject(superView, &kWCCT_ExpandedFormatKey);
+    if (!customShort || !customExpanded) return nil;
+
+    BOOL expanded = WCChangeTime_textLooksExpanded(incomingText);
+    return expanded ? customExpanded : customShort;
+}
 
 %hook MMUILabel
 
@@ -325,35 +426,41 @@ static void WCChangeTime_longPressHandler(UILongPressGestureRecognizer *gesture)
         %orig;
         return;
     }
-
     UIView *superView = self.superview;
     if (superView && [superView isKindOfClass:objc_getClass("ChatTimeCellView")]) {
-        NSString *customShort = objc_getAssociatedObject(superView, &kWCCT_ShortFormatKey);
-        if (customShort) {
-            // 检测微信是否正在切换展开/折叠
-            NSString *customExpanded = objc_getAssociatedObject(superView, &kWCCT_ExpandedFormatKey);
-            BOOL wasExpanded = [objc_getAssociatedObject(superView, &kWCCT_IsExpandedKey) boolValue];
-
-            // 微信在 setText 时切换展开状态，我们跟随切换
-            NSString *oldText = self.text;
-            if (oldText && text && ![oldText isEqualToString:text]) {
-                // 微信正在切换，同步切换我们的文本
-                BOOL nowExpanded = !wasExpanded;
-                objc_setAssociatedObject(superView, &kWCCT_IsExpandedKey, @(nowExpanded), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                NSString *displayText = nowExpanded ? customExpanded : customShort;
-                %orig(displayText);
-                if ([self respondsToSelector:@selector(setTextToCopy:)]) {
-                    self.textToCopy = displayText;
-                }
-                return;
-            }
-
-            // 非切换，使用当前状态的文本
-            BOOL isExpanded = [objc_getAssociatedObject(superView, &kWCCT_IsExpandedKey) boolValue];
-            NSString *displayText = isExpanded ? customExpanded : customShort;
-            %orig(displayText);
+        NSString *replacement = WCChangeTime_resolveDisplayText(superView, text);
+        if (replacement) {
+            %orig(replacement);
             if ([self respondsToSelector:@selector(setTextToCopy:)]) {
-                self.textToCopy = displayText;
+                self.textToCopy = replacement;
+            }
+            return;
+        }
+    }
+    %orig;
+}
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    if (kWCCT_IsSettingText) {
+        %orig;
+        return;
+    }
+    UIView *superView = self.superview;
+    if (superView && [superView isKindOfClass:objc_getClass("ChatTimeCellView")]) {
+        NSString *incoming = attributedText.string ?: @"";
+        NSString *replacement = WCChangeTime_resolveDisplayText(superView, incoming);
+        if (replacement) {
+            // 保留原有 attributed 属性，只换文本
+            NSMutableAttributedString *mutable = [[NSMutableAttributedString alloc] initWithString:replacement];
+            if (attributedText.length > 0) {
+                NSDictionary *attrs = [attributedText attributesAtIndex:0 effectiveRange:NULL];
+                if (attrs) {
+                    [mutable setAttributes:attrs range:NSMakeRange(0, replacement.length)];
+                }
+            }
+            %orig(mutable);
+            if ([self respondsToSelector:@selector(setTextToCopy:)]) {
+                self.textToCopy = replacement;
             }
             return;
         }
@@ -367,14 +474,8 @@ static void WCChangeTime_longPressHandler(UILongPressGestureRecognizer *gesture)
 
 %ctor {
     @autoreleasepool {
-        // 默认启用
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        if ([defaults objectForKey:kWCChangeTimeEnabledKey] == nil) {
-            [defaults setBool:YES forKey:kWCChangeTimeEnabledKey];
-            [defaults synchronize];
-        }
+        // 默认关闭（不设置默认值，BOOL 默认为 NO）
 
-        // 注册到 WCPluginsMgr
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (NSClassFromString(@"WCPluginsMgr")) {
                 [[objc_getClass("WCPluginsMgr") sharedInstance] registerSwitchWithTitle:@"WC-TIME" key:kWCChangeTimeEnabledKey];
