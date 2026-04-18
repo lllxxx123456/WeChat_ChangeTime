@@ -1,0 +1,8 @@
+Package: com.jijiang.wcchangetime
+Name: WeChatChangeTime
+Depends: mobilesubstrate
+Version: 1.0-1
+Architecture: iphoneos-arm
+Description: WeChat Chat Time Editor - Long press to modify chat time display
+Author: jijiang
+Section: Tweaks

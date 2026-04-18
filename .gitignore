@@ -1,0 +1,37 @@
+# theos 构建产物
+.theos/
+packages/
+obj/
+_/
+layout/*/DEBIAN/control
+
+# 编译输出
+*.deb
+*.dylib
+*.dSYM
+*.ipa
+*.tar.gz
+
+# 日志
+*.log
+
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.windsurf/
+xcuserdata/
+*.xcworkspace/xcuserdata/

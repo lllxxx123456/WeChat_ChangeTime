@@ -1,0 +1,96 @@
+name: Build Deb
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_arm:
+        description: '打包有根DEB (iphoneos-arm)'
+        type: boolean
+        default: false
+      build_arm64:
+        description: '打包无根DEB (iphoneos-arm64)'
+        type: boolean
+        default: false
+      build_arm64e:
+        description: '打包隐根DEB (iphoneos-arm64e)'
+        type: boolean
+        default: false
+
+jobs:
+  build-rootful:
+    if: ${{ github.event.inputs.build_arm == 'true' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+
+      - name: Build deb for rootful
+        run: |
+          sed -i 's/\r$//' control Makefile
+          sed -i 's/^ARCHS := .*/ARCHS := arm64/' Makefile
+          sed -i 's/^Architecture: .*/Architecture: iphoneos-arm/' control
+          make clean
+          make package FINALPACKAGE=1
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChatChangeTime-rootful
+          path: packages/*.deb
+          if-no-files-found: error
+
+  build-rootless:
+    if: ${{ github.event.inputs.build_arm64 == 'true' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+
+      - name: Build deb for rootless
+        run: |
+          sed -i 's/\r$//' control Makefile
+          sed -i 's/^ARCHS := .*/ARCHS := arm64/' Makefile
+          sed -i 's/^Architecture: .*/Architecture: iphoneos-arm64/' control
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChatChangeTime-rootless
+          path: packages/*.deb
+          if-no-files-found: error
+
+  build-roothide:
+    if: ${{ github.event.inputs.build_arm64e == 'true' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+
+      - name: Build deb for roothide
+        run: |
+          sed -i 's/\r$//' control Makefile
+          sed -i 's/^ARCHS := .*/ARCHS := arm64e/' Makefile
+          sed -i 's/^Architecture: .*/Architecture: iphoneos-arm64e/' control
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChatChangeTime-roothide
+          path: packages/*.deb
+          if-no-files-found: error
