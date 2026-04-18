@@ -451,14 +451,14 @@ static NSString *WCChangeTime_resolveDisplayText(UIView *superView, NSString *in
         NSString *replacement = WCChangeTime_resolveDisplayText(superView, incoming);
         if (replacement) {
             // 保留原有 attributed 属性，只换文本
-            NSMutableAttributedString *mutable = [[NSMutableAttributedString alloc] initWithString:replacement];
+            NSMutableAttributedString *mutAttr = [[NSMutableAttributedString alloc] initWithString:replacement];
             if (attributedText.length > 0) {
                 NSDictionary *attrs = [attributedText attributesAtIndex:0 effectiveRange:NULL];
                 if (attrs) {
-                    [mutable setAttributes:attrs range:NSMakeRange(0, replacement.length)];
+                    [mutAttr setAttributes:attrs range:NSMakeRange(0, replacement.length)];
                 }
             }
-            %orig(mutable);
+            %orig(mutAttr);
             if ([self respondsToSelector:@selector(setTextToCopy:)]) {
                 self.textToCopy = replacement;
             }
