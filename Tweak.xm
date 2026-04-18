@@ -19,6 +19,7 @@ static BOOL WCChangeTime_enabled(void) {
 
 #pragma mark - 关联对象 Key
 
+static char kWCCT_OrigDateKey;           // 修改前的原始 NSDate
 static char kWCCT_OrigShortKey;          // 修改前的原始折叠文本
 static char kWCCT_OrigExpandedKey;       // 修改前的原始展开文本
 static char kWCCT_CustomShortKey;        // 修改后的折叠文本
@@ -287,6 +288,16 @@ static void WCChangeTime_applyToLabel(UILabel *label, UIView *timeCellView, NSSt
     [timeCellView setNeedsLayout];
 }
 
+#pragma mark - 清除自定义数据
+
+static void WCChangeTime_clearCustomData(UIView *cellView) {
+    objc_setAssociatedObject(cellView, &kWCCT_OrigDateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(cellView, &kWCCT_OrigShortKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(cellView, &kWCCT_OrigExpandedKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(cellView, &kWCCT_CustomShortKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(cellView, &kWCCT_CustomExpandedKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
 #pragma mark - 弹出编辑弹窗
 
 static void WCChangeTime_showEditor(UIView *timeCellView) {
@@ -299,7 +310,7 @@ static void WCChangeTime_showEditor(UIView *timeCellView) {
     NSString *currentText = label.text ?: @"";
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"WC-TIME"
-                                                                  message:@"修改聊天时间显示\n\n支持输入格式：\n14:30\n昨天 14:30\n星期六 14:30\n3月29日 14:30\n3月29日 星期六 14:30\n2025-03-29 14:30"
+                                                                  message:@"修改聊天时间显示\n\n支持输入格式：\n02:30\n昨天 02:30\n星期五 02:30\n6月28日 02:30\n6月28日 星期五 02:30\n2024-06-28 02:30"
                                                            preferredStyle:UIAlertControllerStyleAlert];
 
     [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
@@ -330,6 +341,7 @@ static void WCChangeTime_showEditor(UIView *timeCellView) {
         NSString *customShort = WCChangeTime_shortFormat(newDate);
         NSString *customExpanded = WCChangeTime_expandedFormat(newDate);
 
+        objc_setAssociatedObject(timeCellView, &kWCCT_OrigDateKey, origDate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(timeCellView, &kWCCT_OrigShortKey, origShort, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(timeCellView, &kWCCT_OrigExpandedKey, origExpanded, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(timeCellView, &kWCCT_CustomShortKey, customShort, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -342,10 +354,7 @@ static void WCChangeTime_showEditor(UIView *timeCellView) {
     }];
 
     UIAlertAction *restoreAction = [UIAlertAction actionWithTitle:@"还原" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        objc_setAssociatedObject(timeCellView, &kWCCT_OrigShortKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(timeCellView, &kWCCT_OrigExpandedKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(timeCellView, &kWCCT_CustomShortKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(timeCellView, &kWCCT_CustomExpandedKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        WCChangeTime_clearCustomData(timeCellView);
         [timeCellView setNeedsLayout];
     }];
 
@@ -415,28 +424,45 @@ static void WCChangeTime_longPressHandler(UILongPressGestureRecognizer *gesture)
 
 %end
 
-#pragma mark - Hook MMUILabel (拦截展开/折叠切换)
+#pragma mark - Hook MMUILabel (\u62e6\u622a\u5c55\u5f00/\u6298\u53e0\u5207\u6362)
 
 static NSString *WCChangeTime_resolveDisplayText(UIView *cellView, NSString *incomingText) {
+    NSDate *origDate = objc_getAssociatedObject(cellView, &kWCCT_OrigDateKey);
     NSString *origShort = objc_getAssociatedObject(cellView, &kWCCT_OrigShortKey);
     NSString *origExpanded = objc_getAssociatedObject(cellView, &kWCCT_OrigExpandedKey);
     NSString *customShort = objc_getAssociatedObject(cellView, &kWCCT_CustomShortKey);
     NSString *customExpanded = objc_getAssociatedObject(cellView, &kWCCT_CustomExpandedKey);
-    if (!origShort || !customShort || !customExpanded) return nil;
+    if (!customShort || !customExpanded) return nil;
 
-    // 匹配原始折叠文本 → 返回自定义折叠
-    if ([incomingText isEqualToString:origShort]) {
+    // 已经是自定义文本，跳过（防止重复处理）
+    if ([incomingText isEqualToString:customShort] || [incomingText isEqualToString:customExpanded]) {
+        return nil;
+    }
+
+    // 1) 精确匹配原始折叠文本
+    if (origShort && [incomingText isEqualToString:origShort]) {
         return customShort;
     }
-    // 匹配原始展开文本 → 返回自定义展开
+    // 2) 精确匹配原始展开文本
     if (origExpanded && [incomingText isEqualToString:origExpanded]) {
         return customExpanded;
     }
+
+    // 3) 回退：解析传入文本的日期，和原始日期比对
+    //    如果是同一条消息（60秒内），说明只是格式不同，仍然替换
+    if (origDate) {
+        NSDate *incomingDate = WCChangeTime_parseInputTime(incomingText);
+        if (incomingDate) {
+            NSTimeInterval diff = fabs([incomingDate timeIntervalSinceDate:origDate]);
+            if (diff < 60) {
+                BOOL expanded = WCChangeTime_textLooksExpanded(incomingText);
+                return expanded ? customExpanded : customShort;
+            }
+        }
+    }
+
     // 都不匹配 → cell 被复用了，清除自定义数据
-    objc_setAssociatedObject(cellView, &kWCCT_OrigShortKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(cellView, &kWCCT_OrigExpandedKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(cellView, &kWCCT_CustomShortKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(cellView, &kWCCT_CustomExpandedKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    WCChangeTime_clearCustomData(cellView);
     return nil;
 }
 
