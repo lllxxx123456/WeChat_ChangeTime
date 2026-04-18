@@ -6,90 +6,24 @@
 
 static NSString *const kWCChangeTimeEnabledKey = @"WCChangeTimeEnabled";
 
+static char kWCCT_CustomDateKey;
+static char kWCCT_CustomDateMapKey;
+static char kWCCT_LongPressGestureKey;
+
 static BOOL WCChangeTime_enabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:kWCChangeTimeEnabledKey];
 }
 
-#pragma mark - Associated Keys
-
-static char kWCCT_OrigDateKey;
-static char kWCCT_OrigShortKey;
-static char kWCCT_OrigExpandedKey;
-static char kWCCT_OrigClockKey;
-static char kWCCT_CustomShortKey;
-static char kWCCT_CustomExpandedKey;
-static char kWCCT_LongPressGestureKey;
-static BOOL kWCCT_IsSettingText = NO;
-
-#pragma mark - Formatting
+#pragma mark - Format
 
 static NSString *WCChangeTime_weekday(NSInteger idx) {
     static NSArray<NSString *> *names;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
         names = @[@"", @"星期日", @"星期一", @"星期二", @"星期三", @"星期四", @"星期五", @"星期六"];
     });
     return (idx >= 1 && idx <= 7) ? names[idx] : @"";
 }
-
-static NSString *WCChangeTime_clockString(NSDate *date) {
-    if (!date) return nil;
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
-    formatter.dateFormat = @"HH:mm";
-    return [formatter stringFromDate:date];
-}
-
-static NSString *WCChangeTime_shortFormat(NSDate *date) {
-    if (!date) return nil;
-
-    NSCalendar *calendar = [NSCalendar currentCalendar];
-    NSDate *now = [NSDate date];
-    NSDateComponents *target = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitWeekday) fromDate:date];
-    NSString *clock = WCChangeTime_clockString(date);
-
-    if ([calendar isDateInToday:date]) return clock;
-    if ([calendar isDateInYesterday:date]) return [NSString stringWithFormat:@"昨天 %@", clock];
-
-    NSDateComponents *diff = [calendar components:NSCalendarUnitDay
-                                         fromDate:[calendar startOfDayForDate:date]
-                                           toDate:[calendar startOfDayForDate:now]
-                                          options:0];
-    if (diff.day >= 2 && diff.day <= 6) {
-        return [NSString stringWithFormat:@"%@ %@", WCChangeTime_weekday(target.weekday), clock];
-    }
-
-    NSInteger currentYear = [calendar component:NSCalendarUnitYear fromDate:now];
-    if (target.year == currentYear) {
-        return [NSString stringWithFormat:@"%ld月%ld日 %@", (long)target.month, (long)target.day, clock];
-    }
-    return [NSString stringWithFormat:@"%ld年%ld月%ld日 %@", (long)target.year, (long)target.month, (long)target.day, clock];
-}
-
-static NSString *WCChangeTime_expandedFormat(NSDate *date) {
-    if (!date) return nil;
-
-    NSCalendar *calendar = [NSCalendar currentCalendar];
-    NSDate *now = [NSDate date];
-    NSDateComponents *target = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitWeekday) fromDate:date];
-    NSString *clock = WCChangeTime_clockString(date);
-    NSString *weekday = WCChangeTime_weekday(target.weekday);
-    NSInteger currentYear = [calendar component:NSCalendarUnitYear fromDate:now];
-
-    if (target.year == currentYear) {
-        return [NSString stringWithFormat:@"%ld月%ld日%@%@", (long)target.month, (long)target.day, weekday, clock];
-    }
-    return [NSString stringWithFormat:@"%ld年%ld月%ld日%@%@", (long)target.year, (long)target.month, (long)target.day, weekday, clock];
-}
-
-static BOOL WCChangeTime_textLooksExpanded(NSString *text) {
-    if (!text) return NO;
-    BOOL hasMonthDay = [text containsString:@"月"] && [text containsString:@"日"];
-    BOOL hasWeekday = [text containsString:@"星期"];
-    return [text containsString:@"年"] || (hasMonthDay && hasWeekday);
-}
-
-#pragma mark - Text Helpers
 
 static NSString *WCChangeTime_normalize(NSString *text) {
     if (!text) return nil;
@@ -103,57 +37,88 @@ static NSString *WCChangeTime_normalize(NSString *text) {
 
 static NSString *WCChangeTime_compact(NSString *text) {
     NSString *normalized = WCChangeTime_normalize(text);
-    if (!normalized) return nil;
+    if (!normalized.length) return nil;
     return [[normalized componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsJoinedByString:@""];
 }
 
-static BOOL WCChangeTime_looseEquals(NSString *lhs, NSString *rhs) {
-    if (!lhs || !rhs) return NO;
-    if ([lhs isEqualToString:rhs]) return YES;
-
-    NSString *left = WCChangeTime_normalize(lhs);
-    NSString *right = WCChangeTime_normalize(rhs);
-    if ([left isEqualToString:right]) return YES;
-
-    NSString *leftCompact = WCChangeTime_compact(lhs);
-    NSString *rightCompact = WCChangeTime_compact(rhs);
-    return leftCompact && rightCompact && [leftCompact isEqualToString:rightCompact];
-}
-
-static NSString *WCChangeTime_timeToken(NSString *text) {
-    NSString *normalized = WCChangeTime_normalize(text);
-    if (!normalized.length) return nil;
-
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"(\\d{1,2}:\\d{2})"
-                                                                           options:0
-                                                                             error:nil];
-    NSTextCheckingResult *match = [regex firstMatchInString:normalized
-                                                    options:0
-                                                      range:NSMakeRange(0, normalized.length)];
-    if (!match || match.numberOfRanges < 2) return nil;
-    return [normalized substringWithRange:[match rangeAtIndex:1]];
-}
-
-static BOOL WCChangeTime_isClockOnlyText(NSString *text) {
+static BOOL WCChangeTime_hasWhitespace(NSString *text) {
     NSString *normalized = WCChangeTime_normalize(text);
     if (!normalized.length) return NO;
+    return [normalized rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound;
+}
 
-    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^\\d{1,2}:\\d{2}$"
-                                                                           options:0
-                                                                             error:nil];
-    return [regex firstMatchInString:normalized options:0 range:NSMakeRange(0, normalized.length)] != nil;
+static BOOL WCChangeTime_textLooksExpanded(NSString *text) {
+    if (!text.length) return NO;
+    BOOL hasMonthDay = [text containsString:@"月"] && [text containsString:@"日"];
+    BOOL hasWeekday = [text containsString:@"星期"];
+    return [text containsString:@"年"] || (hasMonthDay && hasWeekday);
+}
+
+static NSString *WCChangeTime_clockString(NSDate *date) {
+    if (!date) return nil;
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+    formatter.dateFormat = @"HH:mm";
+    return [formatter stringFromDate:date];
+}
+
+static NSString *WCChangeTime_shortFormat(NSDate *date, BOOL compactStyle) {
+    if (!date) return nil;
+
+    NSCalendar *calendar = [NSCalendar currentCalendar];
+    NSDate *now = [NSDate date];
+    NSDateComponents *target = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitWeekday) fromDate:date];
+    NSString *clock = WCChangeTime_clockString(date);
+    NSString *separator = compactStyle ? @"" : @" ";
+
+    if ([calendar isDateInToday:date]) return clock;
+    if ([calendar isDateInYesterday:date]) return [NSString stringWithFormat:@"昨天%@%@", separator, clock];
+
+    NSDateComponents *diff = [calendar components:NSCalendarUnitDay
+                                         fromDate:[calendar startOfDayForDate:date]
+                                           toDate:[calendar startOfDayForDate:now]
+                                          options:0];
+    if (diff.day >= 2 && diff.day <= 6) {
+        return [NSString stringWithFormat:@"%@%@%@", WCChangeTime_weekday(target.weekday), separator, clock];
+    }
+
+    NSInteger currentYear = [calendar component:NSCalendarUnitYear fromDate:now];
+    if (target.year == currentYear) {
+        return [NSString stringWithFormat:@"%ld月%ld日%@%@", (long)target.month, (long)target.day, separator, clock];
+    }
+    return [NSString stringWithFormat:@"%ld年%ld月%ld日%@%@", (long)target.year, (long)target.month, (long)target.day, separator, clock];
+}
+
+static NSString *WCChangeTime_expandedFormat(NSDate *date, BOOL compactStyle) {
+    if (!date) return nil;
+
+    NSCalendar *calendar = [NSCalendar currentCalendar];
+    NSDate *now = [NSDate date];
+    NSDateComponents *target = [calendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitWeekday) fromDate:date];
+    NSString *clock = WCChangeTime_clockString(date);
+    NSString *weekday = WCChangeTime_weekday(target.weekday);
+
+    if (compactStyle) {
+        NSInteger currentYear = [calendar component:NSCalendarUnitYear fromDate:now];
+        if (target.year == currentYear) {
+            return [NSString stringWithFormat:@"%ld月%ld日%@%@", (long)target.month, (long)target.day, weekday, clock];
+        }
+        return [NSString stringWithFormat:@"%ld年%ld月%ld日%@%@", (long)target.year, (long)target.month, (long)target.day, weekday, clock];
+    }
+
+    NSInteger currentYear = [calendar component:NSCalendarUnitYear fromDate:now];
+    if (target.year == currentYear) {
+        return [NSString stringWithFormat:@"%ld月%ld日 %@ %@", (long)target.month, (long)target.day, weekday, clock];
+    }
+    return [NSString stringWithFormat:@"%ld年%ld月%ld日 %@ %@", (long)target.year, (long)target.month, (long)target.day, weekday, clock];
+}
+
+static NSString *WCChangeTime_formatLikeOriginal(NSDate *date, NSString *originalText) {
+    BOOL compactStyle = !WCChangeTime_hasWhitespace(originalText);
+    return WCChangeTime_textLooksExpanded(originalText) ? WCChangeTime_expandedFormat(date, compactStyle) : WCChangeTime_shortFormat(date, compactStyle);
 }
 
 #pragma mark - View Lookup
-
-static UIView *WCChangeTime_findChatTimeCellView(UIView *view) {
-    UIView *current = view;
-    while (current) {
-        if ([current isKindOfClass:objc_getClass("ChatTimeCellView")]) return current;
-        current = current.superview;
-    }
-    return nil;
-}
 
 static UILabel *WCChangeTime_findTimeLabel(UIView *view) {
     if (!view) return nil;
@@ -177,7 +142,7 @@ static UIViewController *WCChangeTime_findVC(UIView *view) {
     return nil;
 }
 
-#pragma mark - Parsing
+#pragma mark - Parse
 
 static NSDate *WCChangeTime_parseTime(NSString *raw) {
     NSString *input = WCChangeTime_normalize(raw);
@@ -306,96 +271,125 @@ static NSDate *WCChangeTime_parseTime(NSString *raw) {
     return nil;
 }
 
-#pragma mark - State
+#pragma mark - ViewModel State
 
-static void WCChangeTime_clear(UIView *cellView) {
-    objc_setAssociatedObject(cellView, &kWCCT_OrigDateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(cellView, &kWCCT_OrigShortKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(cellView, &kWCCT_OrigExpandedKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(cellView, &kWCCT_OrigClockKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(cellView, &kWCCT_CustomShortKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(cellView, &kWCCT_CustomExpandedKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+static NSString *WCChangeTime_keyForViewModel(ChatTimeViewModel *viewModel) {
+    if (!viewModel) return nil;
+
+    NSTimeInterval timestamp = viewModel.showingTime;
+    if (timestamp <= 0.0) timestamp = viewModel.createTime;
+    if (timestamp <= 0.0) return nil;
+
+    return [NSString stringWithFormat:@"show:%.6f|create:%.6f|model:%llu|split:%llu",
+            viewModel.showingTime,
+            viewModel.createTime,
+            (unsigned long long)viewModel.modelType,
+            (unsigned long long)viewModel.splitPosition];
 }
 
-static void WCChangeTime_applyLabelText(UILabel *label, UIView *cellView, NSString *text) {
+static NSMutableDictionary<NSString *, NSDate *> *WCChangeTime_mapForController(UIViewController *vc, BOOL createIfNeeded) {
+    if (!vc) return nil;
+
+    NSMutableDictionary<NSString *, NSDate *> *map = objc_getAssociatedObject(vc, &kWCCT_CustomDateMapKey);
+    if (!map && createIfNeeded) {
+        map = [NSMutableDictionary dictionary];
+        objc_setAssociatedObject(vc, &kWCCT_CustomDateMapKey, map, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return map;
+}
+
+static NSDate *WCChangeTime_customDateForViewModel(ChatTimeViewModel *viewModel) {
+    if (!viewModel) return nil;
+
+    NSDate *date = objc_getAssociatedObject(viewModel, &kWCCT_CustomDateKey);
+    if (date) return date;
+
+    UIView *cellView = [viewModel.cellView isKindOfClass:[UIView class]] ? (UIView *)viewModel.cellView : nil;
+    UIViewController *vc = WCChangeTime_findVC(cellView);
+    NSString *key = WCChangeTime_keyForViewModel(viewModel);
+    if (!vc || !key.length) return nil;
+
+    date = WCChangeTime_mapForController(vc, NO)[key];
+    if (date) {
+        objc_setAssociatedObject(viewModel, &kWCCT_CustomDateKey, date, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return date;
+}
+
+static void WCChangeTime_storeCustomDate(ChatTimeViewModel *viewModel, UIViewController *vc, NSDate *date) {
+    if (!viewModel) return;
+
+    objc_setAssociatedObject(viewModel, &kWCCT_CustomDateKey, date, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSString *key = WCChangeTime_keyForViewModel(viewModel);
+    if (!vc || !key.length) return;
+
+    NSMutableDictionary<NSString *, NSDate *> *map = WCChangeTime_mapForController(vc, date != nil);
+    if (!map) return;
+
+    if (date) {
+        map[key] = date;
+    } else {
+        [map removeObjectForKey:key];
+    }
+}
+
+static NSString *WCChangeTime_replacementText(ChatTimeViewModel *viewModel, NSString *originalText) {
+    if (!WCChangeTime_enabled()) return nil;
+
+    NSDate *customDate = WCChangeTime_customDateForViewModel(viewModel);
+    if (!customDate) return nil;
+
+    NSString *baseText = originalText;
+    if (!baseText.length) {
+        UIView *cellView = [viewModel.cellView isKindOfClass:[UIView class]] ? (UIView *)viewModel.cellView : nil;
+        UILabel *label = WCChangeTime_findTimeLabel(cellView);
+        baseText = label.text ?: @"";
+    }
+    if (!baseText.length) return nil;
+    return WCChangeTime_formatLikeOriginal(customDate, baseText);
+}
+
+#pragma mark - UI Refresh
+
+static void WCChangeTime_applyLabelText(UILabel *label, NSString *text) {
     if (!label || !text.length) return;
 
-    kWCCT_IsSettingText = YES;
     label.text = text;
     if ([label respondsToSelector:@selector(setTextToCopy:)]) {
         ((MMUILabel *)label).textToCopy = text;
     }
-    kWCCT_IsSettingText = NO;
-
     [label invalidateIntrinsicContentSize];
-    [cellView setNeedsLayout];
 }
 
-static void WCChangeTime_restoreOriginal(UIView *cellView) {
+static void WCChangeTime_refreshTimeCell(ChatTimeCellView *cellView) {
+    if (!cellView || !WCChangeTime_enabled()) return;
+
+    ChatTimeViewModel *viewModel = cellView.viewModel;
+    if (!viewModel) return;
+
+    NSString *displayText = WCChangeTime_replacementText(viewModel, nil);
+    if (!displayText.length) return;
+
     UILabel *label = WCChangeTime_findTimeLabel(cellView);
-    NSString *currentText = label.text ?: @"";
-    NSString *origShort = objc_getAssociatedObject(cellView, &kWCCT_OrigShortKey);
-    NSString *origExpanded = objc_getAssociatedObject(cellView, &kWCCT_OrigExpandedKey);
+    if (!label) return;
 
-    NSString *restoreText = WCChangeTime_textLooksExpanded(currentText) ? (origExpanded ?: origShort) : (origShort ?: origExpanded);
-    WCChangeTime_clear(cellView);
-
-    if (restoreText.length > 0 && label) {
-        WCChangeTime_applyLabelText(label, cellView, restoreText);
-        return;
-    }
-
-    [cellView setNeedsLayout];
-}
-
-static NSString *WCChangeTime_resolve(UIView *cellView, NSString *incoming) {
-    NSDate *origDate = objc_getAssociatedObject(cellView, &kWCCT_OrigDateKey);
-    NSString *origShort = objc_getAssociatedObject(cellView, &kWCCT_OrigShortKey);
-    NSString *origExpanded = objc_getAssociatedObject(cellView, &kWCCT_OrigExpandedKey);
-    NSString *origClock = objc_getAssociatedObject(cellView, &kWCCT_OrigClockKey);
-    NSString *customShort = objc_getAssociatedObject(cellView, &kWCCT_CustomShortKey);
-    NSString *customExpanded = objc_getAssociatedObject(cellView, &kWCCT_CustomExpandedKey);
-    if (!customShort || !customExpanded) return nil;
-
-    if (WCChangeTime_looseEquals(incoming, customShort) || WCChangeTime_looseEquals(incoming, customExpanded)) {
-        return nil;
-    }
-
-    if (origShort && WCChangeTime_looseEquals(incoming, origShort)) {
-        return customShort;
-    }
-    if (origExpanded && WCChangeTime_looseEquals(incoming, origExpanded)) {
-        return customExpanded;
-    }
-
-    NSDate *incomingDate = WCChangeTime_parseTime(incoming);
-    if (origDate && incomingDate) {
-        NSTimeInterval diff = [incomingDate timeIntervalSinceDate:origDate];
-        if (diff < 0) diff = -diff;
-        if (diff < 60.0) {
-            return WCChangeTime_textLooksExpanded(incoming) ? customExpanded : customShort;
-        }
-    }
-
-    NSString *incomingClock = WCChangeTime_timeToken(incoming);
-    if (origClock && incomingClock && [incomingClock isEqualToString:origClock] && WCChangeTime_isClockOnlyText(incoming)) {
-        return customShort;
-    }
-
-    WCChangeTime_clear(cellView);
-    return nil;
+    WCChangeTime_applyLabelText(label, displayText);
 }
 
 #pragma mark - Editor
 
-static void WCChangeTime_showEditor(UIView *cellView) {
+static void WCChangeTime_showEditor(ChatTimeCellView *cellView) {
+    if (!cellView) return;
+
     UILabel *label = WCChangeTime_findTimeLabel(cellView);
-    if (!label) return;
+    ChatTimeViewModel *viewModel = cellView.viewModel;
+    if (!label || !viewModel) return;
 
     UIViewController *vc = WCChangeTime_findVC(cellView);
     if (!vc) return;
 
-    NSString *currentText = label.text ?: @"";
+    NSString *currentText = label.text.length ? label.text : (viewModel.timeText ?: @"");
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"WC-TIME"
                                                                   message:@"修改聊天时间显示\n\n支持输入格式：\n14:30\n昨天 14:30\n星期六 14:30\n3月29日 14:30\n3月29日星期六14:30\n2025-03-29 14:30"
@@ -419,47 +413,21 @@ static void WCChangeTime_showEditor(UIView *cellView) {
             return;
         }
 
-        NSDate *origDate = objc_getAssociatedObject(cellView, &kWCCT_OrigDateKey);
-        NSString *origShort = objc_getAssociatedObject(cellView, &kWCCT_OrigShortKey);
-        NSString *origExpanded = objc_getAssociatedObject(cellView, &kWCCT_OrigExpandedKey);
-        NSString *origClock = objc_getAssociatedObject(cellView, &kWCCT_OrigClockKey);
-
-        if (!origDate && !origShort && !origExpanded) {
-            origDate = WCChangeTime_parseTime(currentText);
-
-            BOOL expandedNow = WCChangeTime_textLooksExpanded(currentText);
-            origShort = expandedNow ? nil : currentText;
-            origExpanded = expandedNow ? currentText : nil;
-
-            if (origDate) {
-                if (!origShort) origShort = WCChangeTime_shortFormat(origDate);
-                if (!origExpanded) origExpanded = WCChangeTime_expandedFormat(origDate);
-            }
-
-            origClock = WCChangeTime_timeToken(currentText);
-            if (!origClock && origDate) {
-                origClock = WCChangeTime_clockString(origDate);
-            }
-        }
-
-        NSString *customShort = WCChangeTime_shortFormat(newDate);
-        NSString *customExpanded = WCChangeTime_expandedFormat(newDate);
-
-        objc_setAssociatedObject(cellView, &kWCCT_OrigDateKey, origDate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(cellView, &kWCCT_OrigShortKey, origShort, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(cellView, &kWCCT_OrigExpandedKey, origExpanded, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(cellView, &kWCCT_OrigClockKey, origClock, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(cellView, &kWCCT_CustomShortKey, customShort, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(cellView, &kWCCT_CustomExpandedKey, customExpanded, OBJC_ASSOCIATION_COPY_NONATOMIC);
-
-        NSString *display = WCChangeTime_textLooksExpanded(currentText) ? customExpanded : customShort;
-        WCChangeTime_applyLabelText(label, cellView, display);
+        WCChangeTime_storeCustomDate(viewModel, vc, newDate);
+        [viewModel updateLayouts];
+        [cellView setNeedsLayout];
+        [cellView layoutIfNeeded];
+        WCChangeTime_refreshTimeCell(cellView);
     }]];
 
     [alert addAction:[UIAlertAction actionWithTitle:@"还原"
                                               style:UIAlertActionStyleDestructive
                                             handler:^(__unused UIAlertAction *action) {
-        WCChangeTime_restoreOriginal(cellView);
+        WCChangeTime_storeCustomDate(viewModel, vc, nil);
+        [viewModel updateLayouts];
+        [cellView setNeedsLayout];
+        [cellView layoutIfNeeded];
+        WCChangeTime_applyLabelText(label, viewModel.timeText ?: @"");
     }]];
 
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
@@ -471,7 +439,7 @@ static void WCChangeTime_showEditor(UIView *cellView) {
 static void WCChangeTime_longPress(UILongPressGestureRecognizer *gesture) {
     if (gesture.state != UIGestureRecognizerStateBegan || !WCChangeTime_enabled()) return;
 
-    UIView *cellView = gesture.view;
+    ChatTimeCellView *cellView = [gesture.view isKindOfClass:objc_getClass("ChatTimeCellView")] ? (ChatTimeCellView *)gesture.view : nil;
     if (!cellView) return;
 
     UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -486,7 +454,10 @@ static void WCChangeTime_longPress(UILongPressGestureRecognizer *gesture) {
 - (void)didMoveToSuperview {
     %orig;
     if (!self.superview) return;
-    if (objc_getAssociatedObject(self, &kWCCT_LongPressGestureKey)) return;
+    if (objc_getAssociatedObject(self, &kWCCT_LongPressGestureKey)) {
+        WCChangeTime_refreshTimeCell(self);
+        return;
+    }
 
     UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(wcct_lp:)];
     longPress.minimumPressDuration = 0.8;
@@ -509,6 +480,22 @@ static void WCChangeTime_longPress(UILongPressGestureRecognizer *gesture) {
 
     [self addGestureRecognizer:longPress];
     objc_setAssociatedObject(self, &kWCCT_LongPressGestureKey, longPress, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    WCChangeTime_refreshTimeCell(self);
+}
+
+- (void)setViewModel:(id)viewModel {
+    %orig;
+    WCChangeTime_refreshTimeCell(self);
+}
+
+- (void)layoutInternal {
+    %orig;
+    WCChangeTime_refreshTimeCell(self);
+}
+
+- (void)onClickTimeLabel {
+    %orig;
+    WCChangeTime_refreshTimeCell(self);
 }
 
 %new
@@ -518,51 +505,30 @@ static void WCChangeTime_longPress(UILongPressGestureRecognizer *gesture) {
 
 %end
 
-#pragma mark - Hook MMUILabel
+#pragma mark - Hook ChatTimeViewModel
 
-%hook MMUILabel
+%hook ChatTimeViewModel
 
-- (void)setText:(NSString *)text {
-    if (kWCCT_IsSettingText) {
-        %orig;
-        return;
-    }
-
-    UIView *cellView = WCChangeTime_findChatTimeCellView(self);
-    if (cellView) {
-        NSString *replacement = WCChangeTime_resolve(cellView, text);
-        if (replacement) {
-            %orig(replacement);
-            if ([self respondsToSelector:@selector(setTextToCopy:)]) self.textToCopy = replacement;
-            return;
-        }
-    }
-
-    %orig;
+- (NSString *)timeText {
+    NSString *originalText = %orig;
+    NSString *replacement = WCChangeTime_replacementText(self, originalText);
+    return replacement ?: originalText;
 }
 
-- (void)setAttributedText:(NSAttributedString *)attributedText {
-    if (kWCCT_IsSettingText) {
-        %orig;
-        return;
-    }
+- (double)labelWidth {
+    double originalWidth = %orig;
+    NSString *displayText = WCChangeTime_replacementText(self, nil);
+    if (!displayText.length) return originalWidth;
 
-    UIView *cellView = WCChangeTime_findChatTimeCellView(self);
-    if (cellView) {
-        NSString *replacement = WCChangeTime_resolve(cellView, attributedText.string ?: @"");
-        if (replacement) {
-            NSMutableAttributedString *mutableAttr = [[NSMutableAttributedString alloc] initWithString:replacement];
-            if (attributedText.length > 0) {
-                NSDictionary *attrs = [attributedText attributesAtIndex:0 effectiveRange:NULL];
-                if (attrs) [mutableAttr setAttributes:attrs range:NSMakeRange(0, replacement.length)];
-            }
-            %orig(mutableAttr);
-            if ([self respondsToSelector:@selector(setTextToCopy:)]) self.textToCopy = replacement;
-            return;
-        }
-    }
+    UIView *cellView = [self.cellView isKindOfClass:[UIView class]] ? (UIView *)self.cellView : nil;
+    UILabel *label = WCChangeTime_findTimeLabel(cellView);
+    UIFont *font = label.font ?: [UIFont systemFontOfSize:12.0];
 
-    %orig;
+    CGRect rect = [displayText boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)
+                                            options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                         attributes:@{NSFontAttributeName: font}
+                                            context:nil];
+    return ceil(rect.size.width);
 }
 
 %end
